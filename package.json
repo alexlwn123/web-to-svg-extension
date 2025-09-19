@@ -15,6 +15,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "esbuild-plugin-wasm": "^1.1.0",
     "satori": "^0.10.0",
     "satori-html": "^0.3.0",
     "yoga-wasm-web": "^0.3.3"
@@ -22,4 +23,5 @@
   "devDependencies": {
     "esbuild": "^0.20.2"
   }
+
 }

@@ -74,6 +74,280 @@ let requestId = null;
 let overlay = null;
 let highlight = null;
 let label = null;
+const DOCUMENT_BASE_URL = document.baseURI;
+
+const JUSTIFY_CONTENT_ALLOWED = new Set([
+  'center',
+  'flex-start',
+  'flex-end',
+  'space-between',
+  'space-around'
+]);
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function parsePercentOrNumber(raw, scale = 1) {
+  if (!raw) {
+    return NaN;
+  }
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed.endsWith('%')) {
+    const numeric = parseFloat(trimmed.slice(0, -1));
+    return Number.isNaN(numeric) ? NaN : (numeric / 100) * scale;
+  }
+  const numeric = parseFloat(trimmed);
+  return Number.isNaN(numeric) ? NaN : numeric;
+}
+
+function hueToDegrees(raw) {
+  if (!raw) {
+    return NaN;
+  }
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed.endsWith('deg')) {
+    return parseFloat(trimmed.slice(0, -3));
+  }
+  if (trimmed.endsWith('rad')) {
+    const radians = parseFloat(trimmed.slice(0, -3));
+    return Number.isNaN(radians) ? NaN : (radians * 180) / Math.PI;
+  }
+  if (trimmed.endsWith('turn')) {
+    const turns = parseFloat(trimmed.slice(0, -4));
+    return Number.isNaN(turns) ? NaN : turns * 360;
+  }
+  const numeric = parseFloat(trimmed);
+  return Number.isNaN(numeric) ? NaN : numeric;
+}
+
+function linearToSrgb(value) {
+  if (value <= 0.0031308) {
+    return 12.92 * value;
+  }
+  return 1.055 * value ** (1 / 2.4) - 0.055;
+}
+
+function oklabToLinearSrgb(l, a, b) {
+  const l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+  const m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+  const s_ = l - 0.0894841775 * a - 1.291485548 * b;
+
+  const l3 = l_ ** 3;
+  const m3 = m_ ** 3;
+  const s3 = s_ ** 3;
+
+  return {
+    r: 4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3,
+    g: -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3,
+    b: -0.0041960863 * l3 - 0.7034186147 * m3 + 1.707614701 * s3
+  };
+}
+
+function toRgbString({ r, g, b }, alpha = 1) {
+  const sr = clamp(Math.round(linearToSrgb(clamp(r, 0, 1)) * 255), 0, 255);
+  const sg = clamp(Math.round(linearToSrgb(clamp(g, 0, 1)) * 255), 0, 255);
+  const sb = clamp(Math.round(linearToSrgb(clamp(b, 0, 1)) * 255), 0, 255);
+
+  if (alpha >= 0.999) {
+    return `rgb(${sr}, ${sg}, ${sb})`;
+  }
+  const formattedAlpha = Math.max(0, Math.min(1, alpha));
+  return `rgba(${sr}, ${sg}, ${sb}, ${Number(formattedAlpha.toFixed(3))})`;
+}
+
+function oklchToRgb(l, c, h, alpha = 1) {
+  if (!Number.isFinite(l) || !Number.isFinite(c)) {
+    return null;
+  }
+
+  const lightness = clamp(l, 0, 1);
+  const chroma = Math.max(0, c);
+  let hue = Number.isFinite(h) ? h : 0;
+  if (!Number.isFinite(hue)) {
+    hue = 0;
+  }
+  const hueRadians = ((hue % 360) * Math.PI) / 180;
+
+  const a = chroma === 0 ? 0 : chroma * Math.cos(hueRadians);
+  const b = chroma === 0 ? 0 : chroma * Math.sin(hueRadians);
+
+  const { r, g, b: blue } = oklabToLinearSrgb(lightness, a, b);
+  return toRgbString({ r, g, b: blue }, alpha);
+}
+
+function resolveAbsoluteUrl(rawUrl, baseUrl = DOCUMENT_BASE_URL) {
+  if (!rawUrl) {
+    return null;
+  }
+  const trimmed = rawUrl.trim();
+  if (!trimmed || /^data:/i.test(trimmed) || /^blob:/i.test(trimmed)) {
+    return trimmed;
+  }
+  try {
+    return new URL(trimmed, baseUrl).toString();
+  } catch (error) {
+    console.warn('Failed to resolve URL', { rawUrl, baseUrl, error });
+  }
+  return null;
+}
+
+function normalizeKeywordProperty(property, value) {
+  const trimmed = value.trim();
+  const lowerProp = property.toLowerCase();
+  const lowerValue = trimmed.toLowerCase();
+
+  if (lowerProp === 'justify-content') {
+    if (JUSTIFY_CONTENT_ALLOWED.has(lowerValue)) {
+      return lowerValue;
+    }
+    if (lowerValue === 'normal' || lowerValue === 'start' || lowerValue === 'left') {
+      return 'flex-start';
+    }
+    if (lowerValue === 'end' || lowerValue === 'right') {
+      return 'flex-end';
+    }
+    if (lowerValue === 'space-evenly') {
+      return 'space-around';
+    }
+    return 'flex-start';
+  }
+
+  return trimmed;
+}
+
+function normalizeTransformValue(value) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+  const lower = trimmed.toLowerCase();
+  if (lower === 'none') {
+    return '';
+  }
+
+  const unsupportedPatterns = ['%', 'calc(', 'var(', 'matrix', 'perspective', '3d'];
+  if (unsupportedPatterns.some((pattern) => lower.includes(pattern))) {
+    return '';
+  }
+
+  return trimmed;
+}
+
+function normalizeCssValue(property, value, element) {
+  if (!value) {
+    return value;
+  }
+
+  const keywordNormalized = normalizeKeywordProperty(property, value);
+  if (keywordNormalized === '') {
+    return '';
+  }
+  if (keywordNormalized !== value.trim()) {
+    return keywordNormalized;
+  }
+
+  if (property === 'transform') {
+    return normalizeTransformValue(value);
+  }
+
+  if (value.toLowerCase().includes('oklch(')) {
+    const normalized = value.replace(/oklch\(\s*([^()]+?)\s*\)/gi, (match, inner) => {
+      const [rawComponents, rawAlpha] = inner.split('/');
+      const [lRaw, cRaw, hRaw] = (rawComponents || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      if (!lRaw || !cRaw || !hRaw) {
+        return '#000000';
+      }
+
+      const l = parsePercentOrNumber(lRaw, 1);
+      const c = parsePercentOrNumber(cRaw, 1);
+      const h = hueToDegrees(hRaw);
+      const alpha = rawAlpha ? parsePercentOrNumber(rawAlpha, 1) : 1;
+
+      const converted = oklchToRgb(l, c, h, Number.isFinite(alpha) ? alpha : 1);
+      return converted || '#000000';
+    });
+    return normalized;
+  }
+
+  if (value.includes('url(')) {
+    const normalized = value.replace(/url\(([^)]+)\)/gi, (match, inner) => {
+      const raw = inner.trim().replace(/^['"]|['"]$/g, '');
+      const absolute = resolveAbsoluteUrl(raw);
+      if (!absolute) {
+        return match;
+      }
+      const quote = inner.trim().startsWith('"') ? '"' : inner.trim().startsWith("'") ? "'" : '';
+      const closingQuote = quote;
+      return `url(${quote}${absolute}${closingQuote})`;
+    });
+    return normalized;
+  }
+
+  return value;
+}
+
+function normalizeSrcset(value) {
+  if (!value) {
+    return value;
+  }
+
+  const parts = value
+    .split(',')
+    .map((entry) => {
+      const trimmed = entry.trim();
+      if (!trimmed) {
+        return '';
+      }
+      const segments = trimmed.split(/\s+/);
+      const urlPart = segments.shift();
+      if (!urlPart) {
+        return '';
+      }
+      const absolute = resolveAbsoluteUrl(urlPart);
+      const rebuiltUrl = absolute || urlPart;
+      if (segments.length === 0) {
+        return rebuiltUrl;
+      }
+      return `${rebuiltUrl} ${segments.join(' ')}`;
+    })
+    .filter(Boolean);
+
+  return parts.join(', ');
+}
+
+function normalizeResourceAttributes(root) {
+  root.querySelectorAll('img').forEach((img) => {
+    const src = img.getAttribute('src');
+    const normalizedSrc = resolveAbsoluteUrl(src);
+    if (normalizedSrc) {
+      img.setAttribute('src', normalizedSrc);
+    }
+
+    const srcset = img.getAttribute('srcset');
+    const normalizedSrcset = normalizeSrcset(srcset);
+    if (normalizedSrcset) {
+      img.setAttribute('srcset', normalizedSrcset);
+    }
+  });
+
+  root.querySelectorAll('source').forEach((source) => {
+    const srcset = source.getAttribute('srcset');
+    const normalizedSrcset = normalizeSrcset(srcset);
+    if (normalizedSrcset) {
+      source.setAttribute('srcset', normalizedSrcset);
+    }
+
+    const src = source.getAttribute('src');
+    const normalizedSrc = resolveAbsoluteUrl(src);
+    if (normalizedSrc) {
+      source.setAttribute('src', normalizedSrc);
+    }
+  });
+}
 
 function ensureOverlay() {
   if (overlay) {
@@ -154,7 +428,11 @@ function cloneWithInlineStyles(element) {
         if (!value) {
           return '';
         }
-        return `${property}:${value};`;
+        const normalized = normalizeCssValue(property, value, source);
+        if (!normalized) {
+          return '';
+        }
+        return `${property}:${normalized};`;
       })
       .filter(Boolean)
       .join('');
@@ -169,6 +447,7 @@ function cloneWithInlineStyles(element) {
 
 function serializeElement(element) {
   const clone = cloneWithInlineStyles(element);
+  normalizeResourceAttributes(clone);
   const container = document.createElement('div');
   container.appendChild(clone);
   return container.innerHTML;

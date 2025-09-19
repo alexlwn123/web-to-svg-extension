@@ -6,8 +6,49 @@ const svgOutput = document.getElementById('svg-output');
 const preview = document.getElementById('svg-preview');
 const downloadButton = document.getElementById('download-svg');
 
+const STORAGE_KEY = 'lastResult';
+
 let currentRequestId = null;
 let activeTabId = null;
+
+async function clearStoredResult() {
+  try {
+    await chrome.storage.session.remove(STORAGE_KEY);
+  } catch (error) {
+    console.warn('Failed to clear stored result', error);
+  }
+}
+
+async function restoreLastResult() {
+  try {
+    const stored = await chrome.storage.session.get(STORAGE_KEY);
+    const result = stored?.[STORAGE_KEY];
+    if (!result) {
+      return false;
+    }
+    if (result.type === 'render-complete') {
+      handleRenderComplete(result);
+      return true;
+    }
+    if (result.type === 'selection-cancelled') {
+      handleSelectionCancelled(result);
+      return true;
+    }
+  } catch (error) {
+    console.warn('Failed to restore stored result', error);
+  }
+  return false;
+}
+
+function shouldHandleMessage(message) {
+  if (!message) {
+    return false;
+  }
+  if (message.requestId && currentRequestId && message.requestId !== currentRequestId) {
+    return false;
+  }
+  return true;
+}
 
 function setStatus(message) {
   statusEl.textContent = message ?? '';
@@ -28,10 +69,13 @@ async function withActiveTab(callback) {
 }
 
 async function startSelection() {
+  await clearStoredResult();
   currentRequestId = crypto.randomUUID();
   setLoading(true);
   setStatus('Hover and click the element to capture. Press Esc to cancel.');
   resultSection.hidden = true;
+  svgOutput.value = '';
+  preview.innerHTML = '';
 
   try {
     await withActiveTab((tabId) =>
@@ -61,7 +105,7 @@ async function cancelSelection() {
 }
 
 function handleRenderComplete(message) {
-  if (message.requestId !== currentRequestId) {
+  if (!shouldHandleMessage(message)) {
     return;
   }
   setLoading(false);
@@ -73,10 +117,26 @@ function handleRenderComplete(message) {
     return;
   }
 
+  if (!message.svg) {
+    setStatus('No SVG content was returned.');
+    resultSection.hidden = true;
+    return;
+  }
+
   setStatus('SVG generated successfully.');
   svgOutput.value = message.svg;
   resultSection.hidden = false;
   preview.innerHTML = message.svg;
+}
+
+function handleSelectionCancelled(message) {
+  if (!shouldHandleMessage(message)) {
+    return;
+  }
+  setLoading(false);
+  currentRequestId = null;
+  setStatus('Selection cancelled.');
+  resultSection.hidden = true;
 }
 
 function downloadSvg() {
@@ -99,11 +159,9 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
 
-  if (message.type === 'selection-cancelled' && message.requestId === currentRequestId) {
-    setLoading(false);
-    setStatus('Selection cancelled.');
-    currentRequestId = null;
-    resultSection.hidden = true;
+  if (message.type === 'selection-cancelled') {
+    handleSelectionCancelled(message);
+    return;
   }
 
   if (message.type === 'render-complete') {
@@ -117,4 +175,8 @@ downloadButton.addEventListener('click', downloadSvg);
 
 setLoading(false);
 resultSection.hidden = true;
-setStatus('Ready to capture an element.');
+restoreLastResult().then((restored) => {
+  if (!restored) {
+    setStatus('Ready to capture an element.');
+  }
+});

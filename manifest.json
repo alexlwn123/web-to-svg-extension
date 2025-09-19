@@ -19,7 +19,8 @@
   "permissions": [
     "activeTab",
     "tabs",
-    "downloads"
+    "downloads",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -46,6 +47,9 @@
       ]
     }
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "icons": {
     "16": "images/icon16.png",
     "32": "images/icon32.png",

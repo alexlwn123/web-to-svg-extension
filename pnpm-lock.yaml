@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      esbuild-plugin-wasm:
+        specifier: ^1.1.0
+        version: 1.1.0
       satori:
         specifier: ^0.10.0
         version: 0.10.14
@@ -193,6 +196,10 @@ packages:
   emoji-regex@10.5.0:
     resolution: {integrity: sha512-lb49vf1Xzfx080OKA0o6l8DQQpV+6Vg95zyCJX9VB/BqKYlhG7N4wgROUUHRA+ZPUefLnteQOad7z1kT2bV7bg==}
 
+  esbuild-plugin-wasm@1.1.0:
+    resolution: {integrity: sha512-0bQ6+1tUbySSnxzn5jnXHMDvYnT0cN/Wd4Syk8g/sqAIJUg7buTIi22svS3Qz6ssx895NT+TgLPb33xi1OkZig==}
+    engines: {node: '>=0.10.0'}
+
   esbuild@0.20.2:
     resolution: {integrity: sha512-WdOOppmUNU+IbZ0PaDiTst80zjnrOkyJNHoKupIcVyU8Lvla3Ugx94VzkQ32Ijqd7UhHJy75gNWDMUekcrSJ6g==}
     engines: {node: '>=12'}
@@ -337,6 +344,8 @@ snapshots:
       postcss-value-parser: 4.2.0
 
   emoji-regex@10.5.0: {}
+
+  esbuild-plugin-wasm@1.1.0: {}
 
   esbuild@0.20.2:
     optionalDependencies:

@@ -1,4 +1,5 @@
 const esbuild = require('esbuild');
+const { wasmLoader } = require('esbuild-plugin-wasm');
 
 const watch = process.argv.includes('--watch');
 
@@ -15,9 +16,11 @@ async function build() {
     target: ['chrome110'],
     sourcemap: true,
     loader: {
-      '.ttf': 'file'
+      '.ttf': 'file',
+      '.wasm': 'file'
     },
     logLevel: 'info',
+    // plugins: [wasmLoader()]
     // watch: watch ? {
     //   onRebuild(error) {
     //     if (error) {

@@ -1,14 +1,59 @@
 import satori, { init as initSatori } from 'satori';
 import { html as parseHtml } from 'satori-html';
 import initYoga from 'yoga-wasm-web';
+import wasm from '../assets/yoga.wasm';
+import font from '../assets/fonts/Inter-Regular.ttf';
+
+const STORAGE_KEY = 'lastResult';
 
 let yogaReadyPromise = null;
 let fontDataPromise = null;
 
+async function storeResult(result) {
+  try {
+    await chrome.storage.session.set({ [STORAGE_KEY]: result });
+  } catch (error) {
+    console.warn('Failed to persist render result', error);
+  }
+}
+
+async function notifyContexts(result, sender) {
+  try {
+    await chrome.runtime.sendMessage(result);
+  } catch (error) {
+    if (chrome.runtime.lastError) {
+      // Popup might be closed; ignore.
+      console.warn('Popup might be closed; error', error);
+    } else {
+      console.warn('Failed to post result to runtime', error);
+    }
+  }
+
+  if (sender?.tab?.id) {
+    try {
+      await chrome.tabs.sendMessage(sender.tab.id, result);
+    } catch (error) {
+      if (!chrome.runtime.lastError) {
+        console.warn('Failed to post result to tab', error);
+      }
+    }
+  }
+}
+
+async function reopenPopup() {
+  try {
+    await chrome.action.openPopup();
+  } catch (error) {
+    if (!chrome.runtime.lastError) {
+      console.warn('Failed to reopen popup', error);
+    }
+  }
+}
+
 async function ensureYoga() {
   if (!yogaReadyPromise) {
     yogaReadyPromise = (async () => {
-      const response = await fetch(chrome.runtime.getURL('assets/yoga.wasm'));
+      const response = await fetch(wasm);
       if (!response.ok) {
         throw new Error('Failed to load Yoga WASM from assets/yoga.wasm');
       }
@@ -23,7 +68,7 @@ async function ensureYoga() {
 
 async function ensureFont() {
   if (!fontDataPromise) {
-    const response = await fetch(chrome.runtime.getURL('assets/fonts/Inter-Regular.ttf'));
+    const response = await fetch(font);
     if (!response.ok) {
       throw new Error('Font file assets/fonts/Inter-Regular.ttf is missing.');
     }
@@ -62,24 +107,36 @@ async function renderSvg(payload) {
   });
 }
 
-async function handleElementSelected(message) {
+async function buildResult(base, extra = {}) {
+  const result = {
+    ...base,
+    ...extra
+  };
+  await storeResult(result);
+  return result;
+}
+
+async function handleElementSelected(message, sender) {
   try {
     const svg = await renderSvg(message.payload);
-    await chrome.runtime.sendMessage({
-      type: 'render-complete',
-      requestId: message.requestId,
-      svg
-    });
+    const result = await buildResult({ type: 'render-complete', requestId: message.requestId }, { svg });
+    await notifyContexts(result, sender);
+    await reopenPopup();
     return { ok: true };
   } catch (error) {
     const details = error && error.message ? error.message : String(error);
-    await chrome.runtime.sendMessage({
-      type: 'render-complete',
-      requestId: message.requestId,
-      error: details
-    });
+    const result = await buildResult({ type: 'render-complete', requestId: message.requestId }, { error: details });
+    await notifyContexts(result, sender);
+    await reopenPopup();
     return { ok: false, error: details };
   }
+}
+
+async function handleSelectionCancelled(message, sender) {
+  const result = await buildResult({ type: 'selection-cancelled', requestId: message.requestId });
+  await notifyContexts(result, sender);
+  await reopenPopup();
+  return { ok: true };
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -88,14 +145,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'element-selected') {
-    handleElementSelected(message)
+    handleElementSelected(message, sender)
       .then(sendResponse)
       .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
   if (message.type === 'selection-cancelled') {
-    chrome.runtime.sendMessage(message);
-    sendResponse({ ok: true });
+    handleSelectionCancelled(message, sender)
+      .then((response) => sendResponse(response))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+    return true;
   }
 });
