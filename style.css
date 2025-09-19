@@ -108,6 +108,12 @@ textarea {
   overflow: auto;
 }
 
+.debug-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .debug-panel h3 {
   margin: 0;
   font-size: 14px;
@@ -117,6 +123,17 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.debug-fonts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.debug-font {
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .debug-entry {

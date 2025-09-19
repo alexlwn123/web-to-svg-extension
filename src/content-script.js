@@ -105,6 +105,25 @@ const NONE_STRIPPED_PROPERTIES = new Set([
   'outline'
 ]);
 
+const SYSTEM_FONT_FAMILIES = new Set(
+  [
+    '-apple-system',
+    'system-ui',
+    'blinkmacsystemfont',
+    'segoe ui',
+    'sfprodisplay',
+    'sf pro display',
+    'sfprotext',
+    'sf pro text',
+    'helvetica neue',
+    'helvetica',
+    'arial',
+    'sans-serif',
+    'serif',
+    'monospace'
+  ].map((family) => family.toLowerCase())
+);
+
 const BORDER_PROPERTIES = new Set([
   'border',
   'border-top',
@@ -716,8 +735,16 @@ function normalizeFontWeight(value) {
   return 400;
 }
 
+function isSystemFontFamily(family) {
+  if (!family) {
+    return false;
+  }
+  return SYSTEM_FONT_FAMILIES.has(family.toLowerCase());
+}
+
 function collectFontDescriptors(element) {
   const descriptors = new Map();
+  const systemDescriptors = new Map();
   const elements = [element, ...element.querySelectorAll('*')];
 
   elements.forEach((node) => {
@@ -737,21 +764,27 @@ function collectFontDescriptors(element) {
       if (!normalizedFamily) {
         return;
       }
+      const lowerFamily = normalizedFamily.toLowerCase();
       const key = `${normalizedFamily.toLowerCase()}__${fontStyle}__${fontWeight}`;
-      if (!descriptors.has(key)) {
-        descriptors.set(key, {
+      const targetMap = isSystemFontFamily(lowerFamily) ? systemDescriptors : descriptors;
+      if (!targetMap.has(key)) {
+        targetMap.set(key, {
           family: normalizedFamily,
           style: fontStyle,
-          weight: fontWeight
+          weight: fontWeight,
+          system: targetMap === systemDescriptors
         });
       }
     });
   });
 
-  return Array.from(descriptors.values());
+  return {
+    collectable: Array.from(descriptors.values()),
+    system: Array.from(systemDescriptors.values())
+  };
 }
 
-function extractUrlsFromSource(source) {
+function extractUrlsFromSource(source, baseUrl = DOCUMENT_BASE_URL) {
   if (!source) {
     return [];
   }
@@ -763,12 +796,244 @@ function extractUrlsFromSource(source) {
     if ((rawUrl.startsWith('"') && rawUrl.endsWith('"')) || (rawUrl.startsWith("'") && rawUrl.endsWith("'"))) {
       rawUrl = rawUrl.slice(1, -1);
     }
-    const resolved = resolveAbsoluteUrl(rawUrl);
+    const resolved = resolveAbsoluteUrl(rawUrl, baseUrl);
     if (resolved) {
       urls.push(resolved);
     }
   }
   return urls;
+}
+
+const fontFaceEntriesState = {
+  promise: null
+};
+
+function extractDeclaration(block, property) {
+  if (!block) {
+    return '';
+  }
+  const regex = new RegExp(`${property}\\s*:\\s*([^;]+);`, 'i');
+  const match = block.match(regex);
+  return match ? match[1].trim() : '';
+}
+
+function normalizeFontStyle(value) {
+  const normalized = (value || 'normal').toLowerCase();
+  if (normalized === 'italic' || normalized === 'oblique') {
+    return 'italic';
+  }
+  return 'normal';
+}
+
+function addFontFaceEntry(entries, { family, style, weight, urls }) {
+  if (!family || !urls || !urls.length) {
+    return;
+  }
+  const normalizedFamily = normalizeFontFamilyName(family);
+  if (!normalizedFamily) {
+    return;
+  }
+  entries.push({
+    family: normalizedFamily,
+    style: normalizeFontStyle(style),
+    weight: normalizeFontWeight(weight),
+    urls: Array.from(new Set(urls))
+  });
+}
+
+function processCssRules(rules, baseUrl, entries, externalQueue) {
+  if (!rules) {
+    return;
+  }
+  const list = Array.from(rules);
+  list.forEach((rule) => {
+    try {
+      if (typeof CSSRule !== 'undefined' && rule.type === CSSRule.FONT_FACE_RULE) {
+        const style = rule.style;
+        const family = style.getPropertyValue('font-family');
+        if (!family) {
+          return;
+        }
+        const fontStyle = style.getPropertyValue('font-style');
+        const fontWeight = style.getPropertyValue('font-weight');
+        const src = style.getPropertyValue('src');
+        const urls = extractUrlsFromSource(src, baseUrl);
+        addFontFaceEntry(entries, {
+          family,
+          style: fontStyle,
+          weight: fontWeight,
+          urls
+        });
+        return;
+      }
+      if (typeof CSSRule !== 'undefined' && rule.type === CSSRule.IMPORT_RULE) {
+        const importRule = rule;
+        const href = importRule.href;
+        if (!href) {
+          return;
+        }
+        if (importRule.styleSheet && importRule.styleSheet.cssRules) {
+          processCssRules(importRule.styleSheet.cssRules, href, entries, externalQueue);
+          return;
+        }
+        const resolved = resolveAbsoluteUrl(href, baseUrl);
+        if (resolved) {
+          externalQueue.add(resolved);
+        }
+        return;
+      }
+      if (rule && rule.cssRules) {
+        processCssRules(rule.cssRules, baseUrl, entries, externalQueue);
+      }
+    } catch (error) {
+      if (rule && rule.href) {
+        const resolved = resolveAbsoluteUrl(rule.href, baseUrl);
+        if (resolved) {
+          externalQueue.add(resolved);
+        }
+      }
+    }
+  });
+}
+
+function processCssText(cssText, baseUrl, entries, externalQueue) {
+  if (!cssText) {
+    return;
+  }
+
+  const importRegex = /@import\s+(?:url\()?['"]?([^'"\)]+)['"]?\)?[^;]*;/gi;
+  let importMatch;
+  while ((importMatch = importRegex.exec(cssText)) !== null) {
+    const resolved = resolveAbsoluteUrl(importMatch[1], baseUrl);
+    if (resolved) {
+      externalQueue.add(resolved);
+    }
+  }
+
+  const fontFaceRegex = /@font-face\s*{[^}]*}/gi;
+  let match;
+  while ((match = fontFaceRegex.exec(cssText)) !== null) {
+    const block = match[0];
+    const family = extractDeclaration(block, 'font-family');
+    if (!family) {
+      continue;
+    }
+    const fontStyle = extractDeclaration(block, 'font-style');
+    const fontWeight = extractDeclaration(block, 'font-weight');
+    const src = extractDeclaration(block, 'src');
+    const urls = extractUrlsFromSource(src, baseUrl);
+    addFontFaceEntry(entries, {
+      family,
+      style: fontStyle,
+      weight: fontWeight,
+      urls
+    });
+  }
+}
+
+async function collectFontFaceEntries() {
+  const entries = [];
+  const externalQueue = new Set();
+  const seenExternal = new Set();
+
+  Array.from(document.styleSheets).forEach((sheet) => {
+    if (!sheet) {
+      return;
+    }
+    const baseUrl = sheet.href || DOCUMENT_BASE_URL;
+    try {
+      const rules = sheet.cssRules;
+      if (!rules) {
+        return;
+      }
+      processCssRules(rules, baseUrl, entries, externalQueue);
+    } catch (error) {
+      if (sheet.href) {
+        const resolved = resolveAbsoluteUrl(sheet.href, DOCUMENT_BASE_URL);
+        if (resolved) {
+          externalQueue.add(resolved);
+        }
+      }
+    }
+  });
+
+  const queue = [];
+  externalQueue.forEach((url) => {
+    if (!seenExternal.has(url)) {
+      queue.push(url);
+      seenExternal.add(url);
+    }
+  });
+  externalQueue.clear();
+
+  while (queue.length) {
+    const url = queue.shift();
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        continue;
+      }
+      const cssText = await response.text();
+      processCssText(cssText, url, entries, externalQueue);
+    } catch (error) {
+      console.warn('Failed to fetch external stylesheet for fonts', { url, error });
+    }
+
+    externalQueue.forEach((nextUrl) => {
+      if (!seenExternal.has(nextUrl)) {
+        queue.push(nextUrl);
+        seenExternal.add(nextUrl);
+      }
+    });
+    externalQueue.clear();
+  }
+
+  return entries;
+}
+
+async function getFontFaceEntries() {
+  if (!fontFaceEntriesState.promise) {
+    fontFaceEntriesState.promise = collectFontFaceEntries();
+  }
+  try {
+    return await fontFaceEntriesState.promise;
+  } catch (error) {
+    console.warn('Failed to collect font-face entries', error);
+    fontFaceEntriesState.promise = null;
+    return [];
+  }
+}
+
+async function resolveFontFaceUrls(descriptor) {
+  const entries = await getFontFaceEntries();
+  if (!entries.length) {
+    return [];
+  }
+
+  const targetFamily = descriptor.family.toLowerCase();
+  const targetStyle = descriptor.style.toLowerCase();
+  const targetWeight = descriptor.weight;
+
+  let fallback = [];
+
+  for (const entry of entries) {
+    if (entry.family.toLowerCase() !== targetFamily) {
+      continue;
+    }
+    if (!entry.urls || !entry.urls.length) {
+      continue;
+    }
+    if (entry.style === targetStyle && entry.weight === targetWeight) {
+      return entry.urls;
+    }
+    if (!fallback.length && entry.style === targetStyle) {
+      fallback = entry.urls;
+    } else if (!fallback.length) {
+      fallback = entry.urls;
+    }
+  }
+
+  return fallback;
 }
 
 function findMatchingFontFace(descriptor, fontFaces) {
@@ -799,26 +1064,27 @@ function findMatchingFontFace(descriptor, fontFaces) {
 
 async function createFontPayload(fontFace, descriptor) {
   try {
-    if (fontFace.status === 'unloaded') {
+    if (fontFace?.status === 'unloaded') {
       await fontFace.load();
-    } else if (fontFace.status === 'loading') {
+    } else if (fontFace?.status === 'loading') {
       await fontFace.loaded;
     }
   } catch (error) {
     console.warn('Failed to load font face', { descriptor, error });
   }
 
-  let buffer = null;
+  const urlSet = new Set();
   try {
-    if (fontFace.buffer instanceof ArrayBuffer && fontFace.buffer.byteLength > 0) {
-      buffer = fontFace.buffer.slice(0);
+    const resolvedUrls = await resolveFontFaceUrls(descriptor);
+    if (Array.isArray(resolvedUrls)) {
+      resolvedUrls.forEach((url) => urlSet.add(url));
     }
   } catch (error) {
-    console.warn('Failed to access font buffer', { descriptor, error });
+    console.warn('Failed to resolve font-face urls', { descriptor, error });
   }
 
-  const urls = extractUrlsFromSource(fontFace.source || '');
-  if (!buffer && urls.length === 0) {
+  const urls = Array.from(urlSet);
+  if (urls.length === 0) {
     return null;
   }
 
@@ -828,9 +1094,6 @@ async function createFontPayload(fontFace, descriptor) {
     style: descriptor.style
   };
 
-  if (buffer) {
-    payload.data = buffer;
-  }
   if (urls.length) {
     payload.urls = urls;
   }
@@ -840,7 +1103,7 @@ async function createFontPayload(fontFace, descriptor) {
 
 async function collectFontsForElement(element) {
   if (!element || !document.fonts) {
-    return [];
+    return { fonts: [], systemFonts: [] };
   }
 
   try {
@@ -849,9 +1112,9 @@ async function collectFontsForElement(element) {
     console.warn('document.fonts.ready rejected', error);
   }
 
-  const descriptors = collectFontDescriptors(element);
-  if (!descriptors.length) {
-    return [];
+  const { collectable, system } = collectFontDescriptors(element);
+  if (!collectable.length && !system.length) {
+    return { fonts: [], systemFonts: [] };
   }
 
   const fontFaces = [];
@@ -865,18 +1128,11 @@ async function collectFontsForElement(element) {
     }
   }
 
-  if (!fontFaces.length) {
-    return [];
-  }
-
   const results = [];
   const seen = new Set();
 
-  for (const descriptor of descriptors) {
-    const fontFace = findMatchingFontFace(descriptor, fontFaces);
-    if (!fontFace) {
-      continue;
-    }
+  for (const descriptor of collectable) {
+    const fontFace = fontFaces.length ? findMatchingFontFace(descriptor, fontFaces) : null;
     const payload = await createFontPayload(fontFace, descriptor);
     if (!payload) {
       continue;
@@ -888,8 +1144,10 @@ async function collectFontsForElement(element) {
     seen.add(key);
     results.push(payload);
   }
-
-  return results;
+  return {
+    fonts: results,
+    systemFonts: system
+  };
 }
 
 function sendCancel() {
@@ -912,21 +1170,21 @@ async function completeSelection() {
   const serialized = serializeElement(targetElement);
   const backgroundColor = window.getComputedStyle(document.body).backgroundColor || '#ffffff';
 
-  let fonts = [];
+  let fontsResult = { fonts: [], systemFonts: [] };
   try {
-    fonts = await collectFontsForElement(targetElement);
+    fontsResult = await collectFontsForElement(targetElement);
   } catch (error) {
     console.warn('Failed to collect fonts for selection', error);
   }
 
   const styles = Array.isArray(serialized.styles)
     ? serialized.styles.map((entry) => ({
-        selector: typeof entry.selector === 'string' ? entry.selector : 'unknown',
-        cssText: typeof entry.cssText === 'string' ? entry.cssText : ''
-      }))
+      selector: typeof entry.selector === 'string' ? entry.selector : 'unknown',
+      cssText: typeof entry.cssText === 'string' ? entry.cssText : ''
+    }))
     : [];
 
-  chrome.runtime.sendMessage({
+  const request = {
     type: 'element-selected',
     requestId,
     payload: {
@@ -934,10 +1192,12 @@ async function completeSelection() {
       width: Math.max(1, Math.round(rect.width)) || 1,
       height: Math.max(1, Math.round(rect.height)) || 1,
       backgroundColor,
-      fonts,
+      fonts: fontsResult.fonts,
+      systemFonts: fontsResult.systemFonts,
       styles
     }
-  });
+  };
+  chrome.runtime.sendMessage(request);
 }
 
 function stopSelection({ cancelled } = { cancelled: false }) {

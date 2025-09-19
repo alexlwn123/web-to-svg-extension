@@ -12,6 +12,10 @@ const remoteFontCache = new Map();
 const MAX_STYLE_ENTRIES = 200;
 const MAX_SELECTOR_LENGTH = 300;
 const MAX_CSS_TEXT_LENGTH = 4000;
+const MAX_FONT_ENTRIES = 30;
+const MAX_FONT_NAME_LENGTH = 120;
+const FONT_SIGNATURE_WOFF = 'wOFF';
+const FONT_SIGNATURE_WOFF2 = 'wOF2';
 
 async function storeResult(result) {
   try {
@@ -93,6 +97,42 @@ function sanitizeStyles(styles) {
   });
 }
 
+function sanitizeFonts(fonts) {
+  if (!Array.isArray(fonts) || !fonts.length) {
+    return [];
+  }
+
+  return fonts.slice(0, MAX_FONT_ENTRIES).map((fontEntry) => {
+    const name = typeof fontEntry.name === 'string' ? fontEntry.name.slice(0, MAX_FONT_NAME_LENGTH) : 'unknown';
+    const weight = typeof fontEntry.weight === 'number' && Number.isFinite(fontEntry.weight) ? fontEntry.weight : normalizeFontWeight(fontEntry.weight);
+    const style = typeof fontEntry.style === 'string' ? fontEntry.style.slice(0, 40) : 'normal';
+    return {
+      name,
+      weight,
+      style
+    };
+  });
+}
+
+function sanitizeSystemFonts(systemFonts) {
+  if (!Array.isArray(systemFonts) || !systemFonts.length) {
+    return [];
+  }
+
+  return systemFonts.slice(0, MAX_FONT_ENTRIES).map((fontEntry) => {
+    const name = typeof fontEntry.family === 'string' ? fontEntry.family.slice(0, MAX_FONT_NAME_LENGTH) : 'unknown';
+    const weight = typeof fontEntry.weight === 'number' && Number.isFinite(fontEntry.weight)
+      ? fontEntry.weight
+      : normalizeFontWeight(fontEntry.weight);
+    const style = typeof fontEntry.style === 'string' ? fontEntry.style.slice(0, 40) : 'normal';
+    return {
+      name,
+      weight,
+      style
+    };
+  });
+}
+
 function normalizeFontWeight(value) {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return Math.min(900, Math.max(100, Math.round(value)));
@@ -115,6 +155,39 @@ function normalizeFontWeight(value) {
   }
 
   return 400;
+}
+
+function getFontUrlScore(url) {
+  if (!url || typeof url !== 'string') {
+    return 0;
+  }
+  const lower = url.toLowerCase();
+  if (lower.endsWith('.ttf') || lower.endsWith('.otf')) {
+    return 4;
+  }
+  if (lower.includes('format=truetype') || lower.includes('format=opentype')) {
+    return 3;
+  }
+  if (lower.endsWith('.woff')) {
+    return 2;
+  }
+  if (lower.endsWith('.woff2')) {
+    return 1;
+  }
+  return 0;
+}
+
+function sortFontUrls(urls = []) {
+  return Array.from(new Set(urls)).sort((a, b) => getFontUrlScore(b) - getFontUrlScore(a));
+}
+
+function isUnsupportedFontData(buffer) {
+  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength < 4) {
+    return false;
+  }
+  const view = new Uint8Array(buffer, 0, 4);
+  const signature = String.fromCharCode(view[0], view[1], view[2], view[3]);
+  return signature === FONT_SIGNATURE_WOFF || signature === FONT_SIGNATURE_WOFF2;
 }
 
 async function fetchFontFromUrl(url) {
@@ -164,24 +237,36 @@ async function resolveFontPayload(fontPayload) {
     data = fontPayload.data.buffer.slice(0);
   }
 
-  const urlCandidates = Array.isArray(fontPayload.urls)
+  if (data && isUnsupportedFontData(data)) {
+    data = null;
+  }
+
+  const urlCandidatesRaw = Array.isArray(fontPayload.urls)
     ? fontPayload.urls
     : Array.isArray(fontPayload.sources)
       ? fontPayload.sources
       : [];
+  const urlCandidates = sortFontUrls(urlCandidatesRaw);
 
   if (!data) {
     for (const candidate of urlCandidates) {
       try {
         const fetched = await fetchFontFromUrl(candidate);
-        if (fetched) {
+        if (fetched && !isUnsupportedFontData(fetched)) {
           data = fetched;
           break;
+        }
+        if (fetched && isUnsupportedFontData(fetched)) {
+          console.warn('Skipping unsupported font format', { candidate });
         }
       } catch (error) {
         console.warn('Failed to fetch remote font', { candidate, error });
       }
     }
+  }
+
+  if (!data) {
+    return null;
   }
 
   if (!data) {
@@ -239,7 +324,8 @@ async function renderSvg(payload) {
 
   await ensureYoga();
   const fonts = await resolveFonts(payload.fonts);
-  const fontSummary = fonts.map((fontEntry) => ({
+  const systemFonts = await resolveFonts(payload.systemFonts);
+  const fontSummary = [...systemFonts, ...fonts].map((fontEntry) => ({
     name: fontEntry.name,
     weight: fontEntry.weight,
     style: fontEntry.style
@@ -275,12 +361,15 @@ async function handleElementSelected(message, sender) {
   try {
     const { svg, fontSummary } = await renderSvg(message.payload);
     const styles = sanitizeStyles(message.payload?.styles);
+    const fonts = sanitizeFonts(fontSummary);
+    const systemFonts = sanitizeSystemFonts(message.payload?.systemFonts);
     const result = await buildResult(
       { type: 'render-complete', requestId: message.requestId },
       {
         svg,
         styles,
-        fonts: fontSummary
+        fonts,
+        systemFonts
       }
     );
     await notifyContexts(result, sender);

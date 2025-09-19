@@ -6,7 +6,12 @@ const svgOutput = document.getElementById('svg-output');
 const preview = document.getElementById('svg-preview');
 const downloadButton = document.getElementById('download-svg');
 const styleDebug = document.getElementById('style-debug');
+const styleDebugSection = document.getElementById('style-debug-section');
+const fontDebugSection = document.getElementById('font-debug-section');
+const systemFontDebugSection = document.getElementById('system-font-debug-section');
 const styleDebugList = document.getElementById('compiled-styles');
+const fontDebugList = document.getElementById('compiled-fonts');
+const systemFontDebugList = document.getElementById('compiled-system-fonts');
 
 const STORAGE_KEY = 'lastResult';
 
@@ -61,22 +66,36 @@ function setLoading(isLoading) {
   cancelButton.disabled = !isLoading;
 }
 
-function renderStylesDebug(styles) {
-  if (!styleDebug || !styleDebugList) {
+function renderDebugData({ styles = [], fonts = [], systemFonts = [] } = {}) {
+  if (!styleDebug || !styleDebugList || !fontDebugList || !systemFontDebugList) {
     return;
   }
 
   styleDebugList.innerHTML = '';
-  const entries = Array.isArray(styles)
+  fontDebugList.innerHTML = '';
+  systemFontDebugList.innerHTML = '';
+
+  const styleEntries = Array.isArray(styles)
     ? styles.filter((entry) => entry && typeof entry === 'object' && (entry.selector || entry.cssText))
     : [];
+  const fontEntries = Array.isArray(fonts)
+    ? fonts.filter((font) => font && typeof font === 'object' && (font.name || font.style))
+    : [];
+  const systemFontEntries = Array.isArray(systemFonts)
+    ? systemFonts.filter((font) => font && typeof font === 'object' && (font.name || font.style))
+    : [];
 
-  if (!entries.length) {
-    styleDebug.hidden = true;
-    return;
+  if (styleDebugSection) {
+    styleDebugSection.hidden = styleEntries.length === 0;
+  }
+  if (fontDebugSection) {
+    fontDebugSection.hidden = fontEntries.length === 0;
+  }
+  if (systemFontDebugSection) {
+    systemFontDebugSection.hidden = systemFontEntries.length === 0;
   }
 
-  entries.forEach((entry) => {
+  styleEntries.forEach((entry) => {
     const container = document.createElement('div');
     container.className = 'debug-entry';
 
@@ -93,7 +112,28 @@ function renderStylesDebug(styles) {
     styleDebugList.appendChild(container);
   });
 
-  styleDebug.hidden = false;
+  fontEntries.forEach((font) => {
+    const item = document.createElement('div');
+    item.className = 'debug-font';
+    const name = font.name || 'unknown';
+    const style = font.style || 'normal';
+    const weight = typeof font.weight === 'number' ? font.weight : String(font.weight || 'unknown');
+    item.textContent = `${name} - ${style}, ${weight}`;
+    fontDebugList.appendChild(item);
+  });
+
+  systemFontEntries.forEach((font) => {
+    const item = document.createElement('div');
+    item.className = 'debug-font';
+    const name = font.name || 'unknown';
+    const style = font.style || 'normal';
+    const weight = typeof font.weight === 'number' ? font.weight : String(font.weight || 'unknown');
+    item.textContent = `${name} - ${style}, ${weight}`;
+    systemFontDebugList.appendChild(item);
+  });
+
+  styleDebug.hidden =
+    styleEntries.length === 0 && fontEntries.length === 0 && systemFontEntries.length === 0;
 }
 
 async function withActiveTab(callback) {
@@ -113,7 +153,7 @@ async function startSelection() {
   resultSection.hidden = true;
   svgOutput.value = '';
   preview.innerHTML = '';
-  renderStylesDebug([]);
+  renderDebugData();
 
   try {
     await withActiveTab((tabId) =>
@@ -140,7 +180,7 @@ async function cancelSelection() {
   setLoading(false);
   setStatus('Selection cancelled.');
   currentRequestId = null;
-  renderStylesDebug([]);
+  renderDebugData();
 }
 
 function handleRenderComplete(message) {
@@ -153,14 +193,14 @@ function handleRenderComplete(message) {
   if (message.error) {
     setStatus(`Rendering failed: ${message.error}`);
     resultSection.hidden = true;
-    renderStylesDebug([]);
+    renderDebugData();
     return;
   }
 
   if (!message.svg) {
     setStatus('No SVG content was returned.');
     resultSection.hidden = true;
-    renderStylesDebug([]);
+    renderDebugData();
     return;
   }
 
@@ -168,7 +208,7 @@ function handleRenderComplete(message) {
   svgOutput.value = message.svg;
   resultSection.hidden = false;
   preview.innerHTML = message.svg;
-  renderStylesDebug(message.styles);
+  renderDebugData({ styles: message.styles, fonts: message.fonts, systemFonts: message.systemFonts });
 }
 
 function handleSelectionCancelled(message) {
@@ -179,7 +219,7 @@ function handleSelectionCancelled(message) {
   currentRequestId = null;
   setStatus('Selection cancelled.');
   resultSection.hidden = true;
-  renderStylesDebug([]);
+  renderDebugData();
 }
 
 function downloadSvg() {
@@ -218,7 +258,7 @@ downloadButton.addEventListener('click', downloadSvg);
 
 setLoading(false);
 resultSection.hidden = true;
-renderStylesDebug([]);
+renderDebugData();
 restoreLastResult().then((restored) => {
   if (!restored) {
     setStatus('Ready to capture an element.');
