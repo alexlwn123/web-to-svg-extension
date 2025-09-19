@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Web to SVG</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="popup">
+      <header>
+        <h1>Web to SVG</h1>
+        <p>Select an element on the active tab to generate an SVG snapshot.</p>
+      </header>
+      <section class="controls">
+        <button id="start-selection" type="button">Select element</button>
+        <button id="cancel-selection" type="button" class="secondary">Cancel</button>
+      </section>
+      <section id="status" class="status"></section>
+      <section class="result" hidden>
+        <h2>Generated SVG</h2>
+        <textarea id="svg-output" readonly></textarea>
+        <div class="preview-wrapper">
+          <h3>Preview</h3>
+          <div id="svg-preview" class="preview"></div>
+        </div>
+        <button id="download-svg" type="button">Download SVG</button>
+      </section>
+    </main>
+    <script type="module" src="dist/popup.js"></script>
+  </body>
+</html>
