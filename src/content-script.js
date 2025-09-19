@@ -771,8 +771,7 @@ function collectFontDescriptors(element) {
         targetMap.set(key, {
           family: normalizedFamily,
           style: fontStyle,
-          weight: fontWeight,
-          system: targetMap === systemDescriptors
+          weight: fontWeight
         });
       }
     });
@@ -1103,7 +1102,7 @@ async function createFontPayload(fontFace, descriptor) {
 
 async function collectFontsForElement(element) {
   if (!element || !document.fonts) {
-    return { fonts: [], systemFonts: [] };
+    return [];
   }
 
   try {
@@ -1114,7 +1113,7 @@ async function collectFontsForElement(element) {
 
   const { collectable, system } = collectFontDescriptors(element);
   if (!collectable.length && !system.length) {
-    return { fonts: [], systemFonts: [] };
+    return [];
   }
 
   const fontFaces = [];
@@ -1144,10 +1143,14 @@ async function collectFontsForElement(element) {
     seen.add(key);
     results.push(payload);
   }
-  return {
-    fonts: results,
-    systemFonts: system
-  };
+  const systemEntries = system.map((descriptor) => ({
+    name: descriptor.family,
+    weight: descriptor.weight,
+    style: descriptor.style,
+    system: true
+  }));
+
+  return [...results, ...systemEntries];
 }
 
 function sendCancel() {
@@ -1170,7 +1173,7 @@ async function completeSelection() {
   const serialized = serializeElement(targetElement);
   const backgroundColor = window.getComputedStyle(document.body).backgroundColor || '#ffffff';
 
-  let fontsResult = { fonts: [], systemFonts: [] };
+  let fontsResult = [];
   try {
     fontsResult = await collectFontsForElement(targetElement);
   } catch (error) {
@@ -1192,8 +1195,7 @@ async function completeSelection() {
       width: Math.max(1, Math.round(rect.width)) || 1,
       height: Math.max(1, Math.round(rect.height)) || 1,
       backgroundColor,
-      fonts: fontsResult.fonts,
-      systemFonts: fontsResult.systemFonts,
+      fonts: fontsResult,
       styles
     }
   };

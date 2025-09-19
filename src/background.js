@@ -120,7 +120,12 @@ function sanitizeSystemFonts(systemFonts) {
   }
 
   return systemFonts.slice(0, MAX_FONT_ENTRIES).map((fontEntry) => {
-    const name = typeof fontEntry.family === 'string' ? fontEntry.family.slice(0, MAX_FONT_NAME_LENGTH) : 'unknown';
+    const rawName = typeof fontEntry.name === 'string' && fontEntry.name.trim()
+      ? fontEntry.name.trim()
+      : typeof fontEntry.family === 'string' && fontEntry.family.trim()
+        ? fontEntry.family.trim()
+        : 'unknown';
+    const name = rawName.slice(0, MAX_FONT_NAME_LENGTH);
     const weight = typeof fontEntry.weight === 'number' && Number.isFinite(fontEntry.weight)
       ? fontEntry.weight
       : normalizeFontWeight(fontEntry.weight);
@@ -131,6 +136,15 @@ function sanitizeSystemFonts(systemFonts) {
       style
     };
   });
+}
+
+function fontKey(entry) {
+  const name = typeof entry.name === 'string' ? entry.name.toLowerCase() : 'unknown';
+  const style = typeof entry.style === 'string' ? entry.style.toLowerCase() : 'normal';
+  const weight = typeof entry.weight === 'number' && Number.isFinite(entry.weight)
+    ? entry.weight
+    : normalizeFontWeight(entry.weight);
+  return `${name}__${style}__${weight}`;
 }
 
 function normalizeFontWeight(value) {
@@ -221,6 +235,10 @@ async function resolveFontPayload(fontPayload) {
     return null;
   }
 
+  if (fontPayload.system) {
+    return null;
+  }
+
   const name = typeof fontPayload.name === 'string' && fontPayload.name.trim() ? fontPayload.name.trim() : null;
   if (!name) {
     return null;
@@ -269,10 +287,6 @@ async function resolveFontPayload(fontPayload) {
     return null;
   }
 
-  if (!data) {
-    return null;
-  }
-
   return {
     name,
     data,
@@ -284,7 +298,6 @@ async function resolveFontPayload(fontPayload) {
 async function resolveFonts(fontsPayload = []) {
   const resolved = [];
   const seen = new Set();
-
   if (Array.isArray(fontsPayload)) {
     for (const fontPayload of fontsPayload) {
       try {
@@ -292,7 +305,7 @@ async function resolveFonts(fontsPayload = []) {
         if (!fontResult) {
           continue;
         }
-        const key = `${fontResult.name.toLowerCase()}__${fontResult.style}__${fontResult.weight}`;
+        const key = fontKey(fontResult);
         if (seen.has(key)) {
           continue;
         }
@@ -317,19 +330,69 @@ async function resolveFonts(fontsPayload = []) {
   return resolved;
 }
 
+async function resolveSystemFonts(systemFonts = [], existingKeys = new Set()) {
+  if (!Array.isArray(systemFonts) || !systemFonts.length) {
+    return [];
+  }
+
+  const fallbackData = await ensureFont();
+  const results = [];
+  const localSeen = new Set();
+
+  systemFonts.forEach((fontEntry) => {
+    if (!fontEntry || !fontEntry.system) {
+      return;
+    }
+
+    const rawName = typeof fontEntry.name === 'string' && fontEntry.name.trim()
+      ? fontEntry.name.trim()
+      : typeof fontEntry.family === 'string' && fontEntry.family.trim()
+        ? fontEntry.family.trim()
+        : null;
+    if (!rawName) {
+      return;
+    }
+
+    const name = rawName;
+    const style = typeof fontEntry.style === 'string' && fontEntry.style.trim()
+      ? fontEntry.style.trim().toLowerCase()
+      : 'normal';
+    const weight = normalizeFontWeight(fontEntry.weight);
+    const key = `${name.toLowerCase()}__${style}__${weight}`;
+    if (existingKeys.has(key) || localSeen.has(key)) {
+      return;
+    }
+    localSeen.add(key);
+    results.push({
+      name,
+      data: fallbackData,
+      weight,
+      style
+    });
+  });
+
+  return results;
+}
+
 async function renderSvg(payload) {
   if (!payload || !payload.html) {
     throw new Error('No HTML payload received.');
   }
 
   await ensureYoga();
-  const fonts = await resolveFonts(payload.fonts);
-  const systemFonts = await resolveFonts(payload.systemFonts);
-  const fontSummary = [...systemFonts, ...fonts].map((fontEntry) => ({
+  const payloadFonts = Array.isArray(payload.fonts) ? payload.fonts : [];
+  const fonts = await resolveFonts(payloadFonts);
+  const fontSummary = fonts.map((fontEntry) => ({
     name: fontEntry.name,
     weight: fontEntry.weight,
     style: fontEntry.style
   }));
+  const existingKeys = new Set(fonts.map((entry) => fontKey(entry)));
+  const systemFonts = await resolveSystemFonts(
+    payloadFonts.filter((fontEntry) => fontEntry && fontEntry.system),
+    existingKeys
+  );
+  const combinedFonts = fonts.concat(systemFonts);
 
   const width = Math.max(1, Math.round(payload.width || 600));
   const height = Math.max(1, Math.round(payload.height || 400));
@@ -342,7 +405,7 @@ async function renderSvg(payload) {
     width,
     height,
     backgroundColor,
-    fonts
+    fonts: combinedFonts
   });
 
   return { svg, fontSummary };
@@ -362,7 +425,10 @@ async function handleElementSelected(message, sender) {
     const { svg, fontSummary } = await renderSvg(message.payload);
     const styles = sanitizeStyles(message.payload?.styles);
     const fonts = sanitizeFonts(fontSummary);
-    const systemFonts = sanitizeSystemFonts(message.payload?.systemFonts);
+    const systemFontsRaw = Array.isArray(message.payload?.fonts)
+      ? message.payload.fonts.filter((font) => font && font.system)
+      : [];
+    const systemFonts = sanitizeSystemFonts(systemFontsRaw);
     const result = await buildResult(
       { type: 'render-complete', requestId: message.requestId },
       {
