@@ -8,6 +8,10 @@ const STORAGE_KEY = 'lastResult';
 
 let yogaReadyPromise = null;
 let fontDataPromise = null;
+const remoteFontCache = new Map();
+const MAX_STYLE_ENTRIES = 200;
+const MAX_SELECTOR_LENGTH = 300;
+const MAX_CSS_TEXT_LENGTH = 4000;
 
 async function storeResult(result) {
   try {
@@ -77,13 +81,169 @@ async function ensureFont() {
   return fontDataPromise;
 }
 
+function sanitizeStyles(styles) {
+  if (!Array.isArray(styles) || !styles.length) {
+    return [];
+  }
+
+  return styles.slice(0, MAX_STYLE_ENTRIES).map((entry) => {
+    const selector = typeof entry.selector === 'string' ? entry.selector.slice(0, MAX_SELECTOR_LENGTH) : 'unknown';
+    const cssText = typeof entry.cssText === 'string' ? entry.cssText.slice(0, MAX_CSS_TEXT_LENGTH) : '';
+    return { selector, cssText };
+  });
+}
+
+function normalizeFontWeight(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return Math.min(900, Math.max(100, Math.round(value)));
+  }
+
+  const stringValue = (value || '').toString().trim().toLowerCase();
+  if (!stringValue) {
+    return 400;
+  }
+  if (stringValue === 'normal') {
+    return 400;
+  }
+  if (stringValue === 'bold') {
+    return 700;
+  }
+
+  const numeric = parseInt(stringValue, 10);
+  if (Number.isFinite(numeric)) {
+    return Math.min(900, Math.max(100, numeric));
+  }
+
+  return 400;
+}
+
+async function fetchFontFromUrl(url) {
+  if (!url) {
+    return null;
+  }
+
+  if (!remoteFontCache.has(url)) {
+    remoteFontCache.set(
+      url,
+      (async () => {
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch font from ${url}`);
+        }
+        return response.arrayBuffer();
+      })()
+    );
+  }
+
+  try {
+    return await remoteFontCache.get(url);
+  } catch (error) {
+    remoteFontCache.delete(url);
+    throw error;
+  }
+}
+
+async function resolveFontPayload(fontPayload) {
+  if (!fontPayload || typeof fontPayload !== 'object') {
+    return null;
+  }
+
+  const name = typeof fontPayload.name === 'string' && fontPayload.name.trim() ? fontPayload.name.trim() : null;
+  if (!name) {
+    return null;
+  }
+
+  const style = typeof fontPayload.style === 'string' && fontPayload.style.trim() ? fontPayload.style.trim().toLowerCase() : 'normal';
+  const weight = normalizeFontWeight(fontPayload.weight);
+
+  let data = null;
+
+  if (fontPayload.data instanceof ArrayBuffer) {
+    data = fontPayload.data;
+  } else if (fontPayload.data && ArrayBuffer.isView(fontPayload.data)) {
+    data = fontPayload.data.buffer.slice(0);
+  }
+
+  const urlCandidates = Array.isArray(fontPayload.urls)
+    ? fontPayload.urls
+    : Array.isArray(fontPayload.sources)
+      ? fontPayload.sources
+      : [];
+
+  if (!data) {
+    for (const candidate of urlCandidates) {
+      try {
+        const fetched = await fetchFontFromUrl(candidate);
+        if (fetched) {
+          data = fetched;
+          break;
+        }
+      } catch (error) {
+        console.warn('Failed to fetch remote font', { candidate, error });
+      }
+    }
+  }
+
+  if (!data) {
+    return null;
+  }
+
+  return {
+    name,
+    data,
+    weight,
+    style
+  };
+}
+
+async function resolveFonts(fontsPayload = []) {
+  const resolved = [];
+  const seen = new Set();
+
+  if (Array.isArray(fontsPayload)) {
+    for (const fontPayload of fontsPayload) {
+      try {
+        const fontResult = await resolveFontPayload(fontPayload);
+        if (!fontResult) {
+          continue;
+        }
+        const key = `${fontResult.name.toLowerCase()}__${fontResult.style}__${fontResult.weight}`;
+        if (seen.has(key)) {
+          continue;
+        }
+        seen.add(key);
+        resolved.push(fontResult);
+      } catch (error) {
+        console.warn('Failed to resolve font payload', { fontPayload, error });
+      }
+    }
+  }
+
+  if (!resolved.length) {
+    const fallbackData = await ensureFont();
+    resolved.push({
+      name: 'Inter',
+      data: fallbackData,
+      weight: 400,
+      style: 'normal'
+    });
+  }
+
+  return resolved;
+}
+
 async function renderSvg(payload) {
   if (!payload || !payload.html) {
     throw new Error('No HTML payload received.');
   }
 
   await ensureYoga();
-  const fontData = await ensureFont();
+  const fonts = await resolveFonts(payload.fonts);
+  const fontSummary = fonts.map((fontEntry) => ({
+    name: fontEntry.name,
+    weight: fontEntry.weight,
+    style: fontEntry.style
+  }));
 
   const width = Math.max(1, Math.round(payload.width || 600));
   const height = Math.max(1, Math.round(payload.height || 400));
@@ -92,19 +252,14 @@ async function renderSvg(payload) {
   const limitedMarkup = markup.length > 200_000 ? markup.slice(0, 200_000) : markup;
 
   const tree = parseHtml(limitedMarkup);
-  return satori(tree, {
+  const svg = await satori(tree, {
     width,
     height,
     backgroundColor,
-    fonts: [
-      {
-        name: 'Inter',
-        data: fontData,
-        weight: 400,
-        style: 'normal'
-      }
-    ]
+    fonts
   });
+
+  return { svg, fontSummary };
 }
 
 async function buildResult(base, extra = {}) {
@@ -118,8 +273,16 @@ async function buildResult(base, extra = {}) {
 
 async function handleElementSelected(message, sender) {
   try {
-    const svg = await renderSvg(message.payload);
-    const result = await buildResult({ type: 'render-complete', requestId: message.requestId }, { svg });
+    const { svg, fontSummary } = await renderSvg(message.payload);
+    const styles = sanitizeStyles(message.payload?.styles);
+    const result = await buildResult(
+      { type: 'render-complete', requestId: message.requestId },
+      {
+        svg,
+        styles,
+        fonts: fontSummary
+      }
+    );
     await notifyContexts(result, sender);
     await reopenPopup();
     return { ok: true };

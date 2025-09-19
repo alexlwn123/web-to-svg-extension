@@ -84,6 +84,35 @@ const JUSTIFY_CONTENT_ALLOWED = new Set([
   'space-around'
 ]);
 
+const LENGTH_ENFORCED_PROPERTIES = new Set([
+  'max-height',
+  'max-width',
+  'min-height',
+  'min-width',
+  'top',
+  'right',
+  'bottom',
+  'left'
+]);
+
+const NONE_STRIPPED_PROPERTIES = new Set([
+  'background',
+  'background-image',
+  'box-shadow',
+  'text-decoration',
+  'filter',
+  'border-image',
+  'outline'
+]);
+
+const BORDER_PROPERTIES = new Set([
+  'border',
+  'border-top',
+  'border-right',
+  'border-bottom',
+  'border-left'
+]);
+
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
@@ -176,6 +205,16 @@ function oklchToRgb(l, c, h, alpha = 1) {
   return toRgbString({ r, g, b: blue }, alpha);
 }
 
+function oklabToRgb(l, a, b, alpha = 1) {
+  if (!Number.isFinite(l) || !Number.isFinite(a) || !Number.isFinite(b)) {
+    return null;
+  }
+
+  const clampedL = clamp(l, 0, 1);
+  const { r, g, b: blue } = oklabToLinearSrgb(clampedL, a, b);
+  return toRgbString({ r, g, b: blue }, alpha);
+}
+
 function resolveAbsoluteUrl(rawUrl, baseUrl = DOCUMENT_BASE_URL) {
   if (!rawUrl) {
     return null;
@@ -213,6 +252,52 @@ function normalizeKeywordProperty(property, value) {
     return 'flex-start';
   }
 
+  if (lowerProp === 'position') {
+    if (lowerValue === 'absolute' || lowerValue === 'relative') {
+      return lowerValue;
+    }
+    if (lowerValue === 'fixed' || lowerValue === 'sticky') {
+      return 'absolute';
+    }
+    return '';
+  }
+
+  if (lowerProp === 'overflow' || lowerProp === 'overflow-x' || lowerProp === 'overflow-y') {
+    if (lowerValue === 'visible' || lowerValue === 'hidden') {
+      return lowerValue;
+    }
+    if (lowerValue === 'clip') {
+      return 'hidden';
+    }
+    if (lowerValue === 'auto' || lowerValue === 'scroll') {
+      return 'hidden';
+    }
+    return 'visible';
+  }
+
+  if (lowerValue === 'none' && NONE_STRIPPED_PROPERTIES.has(lowerProp)) {
+    return '';
+  }
+
+  if (lowerProp === 'display') {
+    if (lowerValue === 'none') {
+      return 'none';
+    }
+    if (lowerValue === 'flex' || lowerValue === 'inline-flex') {
+      return 'flex';
+    }
+    return 'flex';
+  }
+
+  if (BORDER_PROPERTIES.has(lowerProp)) {
+    if (lowerValue.includes('none')) {
+      return '';
+    }
+    if (/\b0(?:px|em|rem|pt|%)?\b/.test(lowerValue)) {
+      return '';
+    }
+  }
+
   return trimmed;
 }
 
@@ -234,25 +319,65 @@ function normalizeTransformValue(value) {
   return trimmed;
 }
 
+function normalizeLengthValue(value) {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+  const lower = trimmed.toLowerCase();
+  if (['auto', 'none', 'initial', 'inherit', 'unset', 'max-content', 'min-content', 'fit-content'].includes(lower)) {
+    return '';
+  }
+
+  const pxMatch = trimmed.match(/^(-?\d*\.?\d+)\s*px$/i);
+  if (pxMatch) {
+    const numeric = Number(pxMatch[1]);
+    if (Number.isFinite(numeric)) {
+      return `${numeric}px`;
+    }
+    return '';
+  }
+
+  const numberMatch = trimmed.match(/^(-?\d*\.?\d+)$/);
+  if (numberMatch) {
+    const numeric = Number(numberMatch[1]);
+    if (Number.isFinite(numeric)) {
+      return `${numeric}px`;
+    }
+    return '';
+  }
+
+  return '';
+}
+
 function normalizeCssValue(property, value, element) {
   if (!value) {
     return value;
   }
 
-  const keywordNormalized = normalizeKeywordProperty(property, value);
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return '';
+  }
+
+  const keywordNormalized = normalizeKeywordProperty(property, trimmed);
   if (keywordNormalized === '') {
     return '';
   }
-  if (keywordNormalized !== value.trim()) {
+  if (keywordNormalized !== trimmed) {
     return keywordNormalized;
   }
 
-  if (property === 'transform') {
-    return normalizeTransformValue(value);
+  if (LENGTH_ENFORCED_PROPERTIES.has(property.toLowerCase())) {
+    return normalizeLengthValue(trimmed);
   }
 
-  if (value.toLowerCase().includes('oklch(')) {
-    const normalized = value.replace(/oklch\(\s*([^()]+?)\s*\)/gi, (match, inner) => {
+  if (property === 'transform') {
+    return normalizeTransformValue(trimmed);
+  }
+
+  if (trimmed.toLowerCase().includes('oklch(')) {
+    const normalized = trimmed.replace(/oklch\(\s*([^()]+?)\s*\)/gi, (match, inner) => {
       const [rawComponents, rawAlpha] = inner.split('/');
       const [lRaw, cRaw, hRaw] = (rawComponents || '')
         .trim()
@@ -273,8 +398,30 @@ function normalizeCssValue(property, value, element) {
     return normalized;
   }
 
-  if (value.includes('url(')) {
-    const normalized = value.replace(/url\(([^)]+)\)/gi, (match, inner) => {
+  if (trimmed.toLowerCase().includes('oklab(')) {
+    const normalized = trimmed.replace(/oklab\(\s*([^()]+?)\s*\)/gi, (match, inner) => {
+      const [rawComponents, rawAlpha] = inner.split('/');
+      const [lRaw, aRaw, bRaw] = (rawComponents || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      if (!lRaw || !aRaw || !bRaw) {
+        return '#000000';
+      }
+
+      const l = parsePercentOrNumber(lRaw, 1);
+      const a = parseFloat(aRaw);
+      const b = parseFloat(bRaw);
+      const alpha = rawAlpha ? parsePercentOrNumber(rawAlpha, 1) : 1;
+
+      const converted = oklabToRgb(l, a, b, Number.isFinite(alpha) ? alpha : 1);
+      return converted || '#000000';
+    });
+    return normalized;
+  }
+
+  if (trimmed.includes('url(')) {
+    const normalized = trimmed.replace(/url\(([^)]+)\)/gi, (match, inner) => {
       const raw = inner.trim().replace(/^['"]|['"]$/g, '');
       const absolute = resolveAbsoluteUrl(raw);
       if (!absolute) {
@@ -287,7 +434,7 @@ function normalizeCssValue(property, value, element) {
     return normalized;
   }
 
-  return value;
+  return trimmed;
 }
 
 function normalizeSrcset(value) {
@@ -414,10 +561,51 @@ function highlightElement(element) {
   label.style.top = `${Math.max(rect.top - 4, 0)}px`;
 }
 
+function describeNode(node, root) {
+  if (!(node instanceof Element)) {
+    return 'unknown';
+  }
+
+  const segments = [];
+  let current = node;
+  const limit = 10;
+  let depth = 0;
+
+  while (current && current instanceof Element && depth < limit) {
+    let segment = current.tagName.toLowerCase();
+    if (current.id) {
+      segment += `#${current.id}`;
+    } else if (current.classList.length) {
+      const classes = Array.from(current.classList).slice(0, 2);
+      if (classes.length) {
+        segment += `.${classes.join('.')}`;
+      }
+    }
+
+    if (current.parentElement) {
+      const siblings = Array.from(current.parentElement.children);
+      const index = siblings.indexOf(current);
+      if (index >= 0) {
+        segment += `:nth-child(${index + 1})`;
+      }
+    }
+
+    segments.unshift(segment);
+    if (current === root) {
+      break;
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+
+  return segments.join(' > ');
+}
+
 function cloneWithInlineStyles(element) {
   const clone = element.cloneNode(true);
   const sourceElements = [element, ...element.querySelectorAll('*')];
   const cloneElements = [clone, ...clone.querySelectorAll('*')];
+  const collectedStyles = [];
 
   sourceElements.forEach((source, index) => {
     const target = cloneElements[index];
@@ -439,18 +627,269 @@ function cloneWithInlineStyles(element) {
 
     if (inline) {
       target.setAttribute('style', inline);
+      collectedStyles.push({
+        selector: describeNode(source, element),
+        cssText: inline
+      });
     }
   });
 
-  return clone;
+  return { clone, styles: collectedStyles };
 }
 
 function serializeElement(element) {
-  const clone = cloneWithInlineStyles(element);
+  const { clone, styles } = cloneWithInlineStyles(element);
   normalizeResourceAttributes(clone);
   const container = document.createElement('div');
   container.appendChild(clone);
-  return container.innerHTML;
+  return {
+    html: container.innerHTML,
+    styles
+  };
+}
+
+function normalizeFontFamilyName(value) {
+  if (!value) {
+    return '';
+  }
+  return value.trim().replace(/^['"]+|['"]+$/g, '');
+}
+
+function parseFontFamilyList(raw) {
+  if (!raw) {
+    return [];
+  }
+
+  const families = [];
+  let current = '';
+  let quote = '';
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+    if ((char === '"' || char === "'") && raw[index - 1] !== '\\') {
+      if (!quote) {
+        quote = char;
+        continue;
+      }
+      if (quote === char) {
+        quote = '';
+        continue;
+      }
+    }
+    if (char === ',' && !quote) {
+      const normalized = normalizeFontFamilyName(current);
+      if (normalized) {
+        families.push(normalized);
+      }
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+
+  const tail = normalizeFontFamilyName(current);
+  if (tail) {
+    families.push(tail);
+  }
+
+  return families;
+}
+
+function normalizeFontWeight(value) {
+  if (typeof value === 'number') {
+    return clamp(Math.round(value), 100, 900);
+  }
+  const raw = (value || '').toString().trim().toLowerCase();
+  if (!raw) {
+    return 400;
+  }
+  if (raw === 'normal') {
+    return 400;
+  }
+  if (raw === 'bold') {
+    return 700;
+  }
+  const numeric = parseInt(raw, 10);
+  if (Number.isFinite(numeric)) {
+    return clamp(numeric, 100, 900);
+  }
+  return 400;
+}
+
+function collectFontDescriptors(element) {
+  const descriptors = new Map();
+  const elements = [element, ...element.querySelectorAll('*')];
+
+  elements.forEach((node) => {
+    if (!(node instanceof Element)) {
+      return;
+    }
+    const style = window.getComputedStyle(node);
+    const families = parseFontFamilyList(style.fontFamily);
+    if (!families.length) {
+      return;
+    }
+    const fontStyle = (style.fontStyle || 'normal').toLowerCase();
+    const fontWeight = normalizeFontWeight(style.fontWeight);
+
+    families.forEach((family) => {
+      const normalizedFamily = normalizeFontFamilyName(family);
+      if (!normalizedFamily) {
+        return;
+      }
+      const key = `${normalizedFamily.toLowerCase()}__${fontStyle}__${fontWeight}`;
+      if (!descriptors.has(key)) {
+        descriptors.set(key, {
+          family: normalizedFamily,
+          style: fontStyle,
+          weight: fontWeight
+        });
+      }
+    });
+  });
+
+  return Array.from(descriptors.values());
+}
+
+function extractUrlsFromSource(source) {
+  if (!source) {
+    return [];
+  }
+  const urls = [];
+  const regex = /url\(([^)]+)\)/gi;
+  let match;
+  while ((match = regex.exec(source)) !== null) {
+    let rawUrl = match[1].trim();
+    if ((rawUrl.startsWith('"') && rawUrl.endsWith('"')) || (rawUrl.startsWith("'") && rawUrl.endsWith("'"))) {
+      rawUrl = rawUrl.slice(1, -1);
+    }
+    const resolved = resolveAbsoluteUrl(rawUrl);
+    if (resolved) {
+      urls.push(resolved);
+    }
+  }
+  return urls;
+}
+
+function findMatchingFontFace(descriptor, fontFaces) {
+  const targetFamily = descriptor.family.toLowerCase();
+  const targetStyle = descriptor.style.toLowerCase();
+  const targetWeight = descriptor.weight;
+  let fallbackMatch = null;
+
+  for (const fontFace of fontFaces) {
+    const family = normalizeFontFamilyName(fontFace.family).toLowerCase();
+    if (family !== targetFamily) {
+      continue;
+    }
+    const faceWeight = normalizeFontWeight(fontFace.weight);
+    const faceStyle = (fontFace.style || 'normal').toLowerCase();
+    if (faceWeight === targetWeight && faceStyle === targetStyle) {
+      return fontFace;
+    }
+    if (!fallbackMatch && faceStyle === targetStyle) {
+      fallbackMatch = fontFace;
+    } else if (!fallbackMatch) {
+      fallbackMatch = fontFace;
+    }
+  }
+
+  return fallbackMatch;
+}
+
+async function createFontPayload(fontFace, descriptor) {
+  try {
+    if (fontFace.status === 'unloaded') {
+      await fontFace.load();
+    } else if (fontFace.status === 'loading') {
+      await fontFace.loaded;
+    }
+  } catch (error) {
+    console.warn('Failed to load font face', { descriptor, error });
+  }
+
+  let buffer = null;
+  try {
+    if (fontFace.buffer instanceof ArrayBuffer && fontFace.buffer.byteLength > 0) {
+      buffer = fontFace.buffer.slice(0);
+    }
+  } catch (error) {
+    console.warn('Failed to access font buffer', { descriptor, error });
+  }
+
+  const urls = extractUrlsFromSource(fontFace.source || '');
+  if (!buffer && urls.length === 0) {
+    return null;
+  }
+
+  const payload = {
+    name: descriptor.family,
+    weight: descriptor.weight,
+    style: descriptor.style
+  };
+
+  if (buffer) {
+    payload.data = buffer;
+  }
+  if (urls.length) {
+    payload.urls = urls;
+  }
+
+  return payload;
+}
+
+async function collectFontsForElement(element) {
+  if (!element || !document.fonts) {
+    return [];
+  }
+
+  try {
+    await document.fonts.ready;
+  } catch (error) {
+    console.warn('document.fonts.ready rejected', error);
+  }
+
+  const descriptors = collectFontDescriptors(element);
+  if (!descriptors.length) {
+    return [];
+  }
+
+  const fontFaces = [];
+  if (typeof document.fonts.forEach === 'function') {
+    document.fonts.forEach((fontFace) => {
+      fontFaces.push(fontFace);
+    });
+  } else if (typeof document.fonts.values === 'function') {
+    for (const fontFace of document.fonts.values()) {
+      fontFaces.push(fontFace);
+    }
+  }
+
+  if (!fontFaces.length) {
+    return [];
+  }
+
+  const results = [];
+  const seen = new Set();
+
+  for (const descriptor of descriptors) {
+    const fontFace = findMatchingFontFace(descriptor, fontFaces);
+    if (!fontFace) {
+      continue;
+    }
+    const payload = await createFontPayload(fontFace, descriptor);
+    if (!payload) {
+      continue;
+    }
+    const key = `${payload.name.toLowerCase()}__${payload.style}__${payload.weight}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    results.push(payload);
+  }
+
+  return results;
 }
 
 function sendCancel() {
@@ -463,23 +902,40 @@ function sendCancel() {
   });
 }
 
-function completeSelection() {
+async function completeSelection() {
   if (!currentElement || !requestId) {
     return;
   }
 
-  const rect = currentElement.getBoundingClientRect();
-  const serialized = serializeElement(currentElement);
+  const targetElement = currentElement;
+  const rect = targetElement.getBoundingClientRect();
+  const serialized = serializeElement(targetElement);
   const backgroundColor = window.getComputedStyle(document.body).backgroundColor || '#ffffff';
+
+  let fonts = [];
+  try {
+    fonts = await collectFontsForElement(targetElement);
+  } catch (error) {
+    console.warn('Failed to collect fonts for selection', error);
+  }
+
+  const styles = Array.isArray(serialized.styles)
+    ? serialized.styles.map((entry) => ({
+        selector: typeof entry.selector === 'string' ? entry.selector : 'unknown',
+        cssText: typeof entry.cssText === 'string' ? entry.cssText : ''
+      }))
+    : [];
 
   chrome.runtime.sendMessage({
     type: 'element-selected',
     requestId,
     payload: {
-      html: serialized,
+      html: serialized.html,
       width: Math.max(1, Math.round(rect.width)) || 1,
       height: Math.max(1, Math.round(rect.height)) || 1,
-      backgroundColor
+      backgroundColor,
+      fonts,
+      styles
     }
   });
 }
@@ -522,7 +978,9 @@ function onClick(event) {
   event.preventDefault();
   event.stopPropagation();
   event.stopImmediatePropagation();
-  completeSelection();
+  Promise.resolve(completeSelection()).catch((error) => {
+    console.warn('Failed to complete selection', error);
+  });
   stopSelection({ cancelled: false });
 }
 

@@ -5,6 +5,8 @@ const resultSection = document.querySelector('.result');
 const svgOutput = document.getElementById('svg-output');
 const preview = document.getElementById('svg-preview');
 const downloadButton = document.getElementById('download-svg');
+const styleDebug = document.getElementById('style-debug');
+const styleDebugList = document.getElementById('compiled-styles');
 
 const STORAGE_KEY = 'lastResult';
 
@@ -59,6 +61,41 @@ function setLoading(isLoading) {
   cancelButton.disabled = !isLoading;
 }
 
+function renderStylesDebug(styles) {
+  if (!styleDebug || !styleDebugList) {
+    return;
+  }
+
+  styleDebugList.innerHTML = '';
+  const entries = Array.isArray(styles)
+    ? styles.filter((entry) => entry && typeof entry === 'object' && (entry.selector || entry.cssText))
+    : [];
+
+  if (!entries.length) {
+    styleDebug.hidden = true;
+    return;
+  }
+
+  entries.forEach((entry) => {
+    const container = document.createElement('div');
+    container.className = 'debug-entry';
+
+    const selector = document.createElement('div');
+    selector.className = 'debug-selector';
+    selector.textContent = entry.selector || 'unknown';
+    container.appendChild(selector);
+
+    const pre = document.createElement('pre');
+    pre.className = 'debug-css';
+    pre.textContent = entry.cssText || '/* No inline styles captured */';
+    container.appendChild(pre);
+
+    styleDebugList.appendChild(container);
+  });
+
+  styleDebug.hidden = false;
+}
+
 async function withActiveTab(callback) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || tab.id == null) {
@@ -76,6 +113,7 @@ async function startSelection() {
   resultSection.hidden = true;
   svgOutput.value = '';
   preview.innerHTML = '';
+  renderStylesDebug([]);
 
   try {
     await withActiveTab((tabId) =>
@@ -102,6 +140,7 @@ async function cancelSelection() {
   setLoading(false);
   setStatus('Selection cancelled.');
   currentRequestId = null;
+  renderStylesDebug([]);
 }
 
 function handleRenderComplete(message) {
@@ -114,12 +153,14 @@ function handleRenderComplete(message) {
   if (message.error) {
     setStatus(`Rendering failed: ${message.error}`);
     resultSection.hidden = true;
+    renderStylesDebug([]);
     return;
   }
 
   if (!message.svg) {
     setStatus('No SVG content was returned.');
     resultSection.hidden = true;
+    renderStylesDebug([]);
     return;
   }
 
@@ -127,6 +168,7 @@ function handleRenderComplete(message) {
   svgOutput.value = message.svg;
   resultSection.hidden = false;
   preview.innerHTML = message.svg;
+  renderStylesDebug(message.styles);
 }
 
 function handleSelectionCancelled(message) {
@@ -137,6 +179,7 @@ function handleSelectionCancelled(message) {
   currentRequestId = null;
   setStatus('Selection cancelled.');
   resultSection.hidden = true;
+  renderStylesDebug([]);
 }
 
 function downloadSvg() {
@@ -175,6 +218,7 @@ downloadButton.addEventListener('click', downloadSvg);
 
 setLoading(false);
 resultSection.hidden = true;
+renderStylesDebug([]);
 restoreLastResult().then((restored) => {
   if (!restored) {
     setStatus('Ready to capture an element.');
