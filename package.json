@@ -1,7 +1,7 @@
 {
   "name": "web-to-image",
   "version": "0.1.0",
-  "description": "Chrome extension that turns DOM selections into SVGs using Satori.",
+  "description": "Chrome extension that captures DOM elements as images (PNG, JPEG, SVG).",
   "main": "dist/background.js",
   "scripts": {
     "build": "node scripts/build.js",
@@ -9,16 +9,13 @@
   },
   "keywords": [
     "chrome-extension",
-    "satori",
-    "svg"
+    "screenshot",
+    "dom-to-image"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "esbuild-plugin-wasm": "^1.1.0",
-    "satori": "^0.10.0",
-    "satori-html": "^0.3.0",
-    "yoga-wasm-web": "^0.3.3"
+    "html-to-image": "^1.11.11"
   },
   "devDependencies": {
     "esbuild": "^0.20.2"

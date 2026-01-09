@@ -10,65 +10,55 @@ pnpm run build        # Build the extension bundle
 pnpm run watch        # Build with file watching for development
 ```
 
-## Required Assets Setup
-
-Before building, copy these files:
-
-- `assets/yoga.wasm` - Copy from `node_modules/yoga-wasm-web/dist/yoga.wasm`
-- `assets/fonts/Inter-Regular.ttf` - Provide a TTF font file (Inter from `@fontsource/inter` works)
-
 ## Loading the Extension
 
 Load as an unpacked extension at `chrome://extensions` after building.
 
 ## Architecture
 
-This is a Chrome extension (Manifest V3) that captures DOM elements and renders them as SVGs using Satori.
+This is a Chrome extension (Manifest V3) that captures DOM elements as images using html-to-image.
 
 ### Extension Components
 
 **Background Service Worker** (`src/background.js` → `dist/background.js`)
 
-- Initializes Yoga WASM layout engine and Satori renderer
-- Receives HTML/CSS payloads from content script
-- Renders SVG via `satori` and `satori-html`
-- Manages font resolution: fetches remote fonts, handles WOFF/WOFF2 detection, falls back to bundled Inter font
-- Stores results in `chrome.storage.session` and broadcasts to popup/content script
+- Routes messages between content script and popup
+- Handles file downloads via `chrome.downloads`
+- Stores capture results in `chrome.storage.session`
 
 **Content Script** (`src/content-script.js` → `dist/content-script.js`)
 
 - Implements element picker overlay with highlight and label
-- Clones selected element with computed inline styles
-- Normalizes CSS values for Satori compatibility (oklch/oklab color conversion, URL resolution, keyword normalization)
-- Collects font descriptors from `@font-face` rules and `document.fonts`
+- Captures selected element using html-to-image
+- Supports PNG, JPEG, and SVG output formats
 - Communicates via `chrome.runtime.sendMessage`
+
+**Capture Module** (`src/capture.js`)
+
+- Wraps html-to-image library (toPng, toJpeg, toSvg)
+- Handles image loading and font readiness
+- Validates element dimensions (max 4096x4096)
+- Filters out script/noscript nodes
 
 **Popup UI** (`src/popup.js`, `popup.html`)
 
 - Controls selection flow (start/cancel)
-- Displays SVG preview, output, and debug info for styles/fonts
-- Handles SVG download via `chrome.downloads`
+- Format selection (PNG, JPEG, SVG)
+- Quality slider for JPEG
+- Displays image preview
+- Handles download
 
 ### Message Flow
 
-1. Popup sends `start-selection` → Content script activates picker
-2. User clicks element → Content script serializes DOM + styles + fonts
-3. Content script sends `element-selected` → Background renders SVG
-4. Background sends `render-complete` → Popup displays result
+1. Popup sends `start-selection` with format/quality → Content script activates picker
+2. User clicks element → Content script captures via html-to-image
+3. Content script sends `capture-complete` with dataUrl → Background stores and forwards
+4. Background sends result → Popup displays preview
 
-### CSS Normalization
+### Build Configuration
 
-The content script (`SUPPORTED_PROPERTIES` array) filters to ~70 CSS properties Satori supports. Key normalizations:
+The build system uses esbuild with dual formats:
+- Content script: IIFE format (required by Chrome)
+- Background/popup: ESM format
 
-- `oklch()` / `oklab()` → RGB conversion
-- Relative URLs → absolute URLs
-- `position: fixed/sticky` → `absolute`
-- `display: *` → `flex` (Satori's layout model)
-- Length values (`max-width`, etc.) → pixel values only
-
-### Font Handling
-
-- Parses `@font-face` rules from stylesheets (including cross-origin fetches)
-- Prioritizes TTF/OTF over WOFF/WOFF2 (Satori limitation)
-- System fonts (Arial, Helvetica, etc.) fall back to bundled Inter
-- Font data cached in background worker's `remoteFontCache`
+See `docs/BUILD_CONFIGURATION.md` for details.
