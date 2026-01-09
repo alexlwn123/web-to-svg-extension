@@ -1,33 +1,35 @@
-# Web to SVG Chrome Extension
+# Web to Image Chrome Extension
 
-This extension lets you pick any element on the current page (similar to the Chrome DevTools element picker) and exports the DOM subtree as an SVG using [Satori](https://github.com/vercel/satori).
+Capture any DOM element as an image. Pick an element on the page and export it as PNG, JPEG, or SVG.
 
 ## Features
 
-- Activate an element picker from the extension popup and highlight DOM nodes on hover.
-- Click to capture the selected element with its inline styles.
-- Render the captured markup to SVG via Satori in the extension service worker.
-- Preview the generated SVG, copy the markup, or download it directly from the popup.
+- Element picker with hover highlighting
+- Multiple output formats: PNG, JPEG, SVG
+- Quality control for JPEG exports
+- Preview and download from popup
 
 ## Getting Started
 
 1. Install dependencies:
    ```bash
-   npm install
+   pnpm install
    ```
-2. Copy the required runtime assets into the expected locations:
-   - `assets/yoga.wasm`: copy from `node_modules/yoga-wasm-web/dist/yoga.wasm`.
-   - `assets/fonts/Inter-Regular.ttf`: provide a font you are licensed to redistribute (the Inter font from `@fontsource/inter` works well).
-3. Build the extension bundle:
+2. Build the extension:
    ```bash
-   npm run build
+   pnpm run build
    ```
-4. Load the project as an unpacked extension in `chrome://extensions`.
+3. Load as an unpacked extension at `chrome://extensions`
 
-For development you can use `npm run watch` to rebuild on changes.
+Use `pnpm run watch` for development.
 
-## Notes
+## Usage
 
-- Satori supports a subset of CSS. Extremely complex layouts or unsupported properties may not render exactly as in the page.
-- The generated SVG width and height match the element’s bounding box. Resize inside the popup before exporting if needed.
-- The picker listens for <kbd>Esc</kbd> to cancel. You can also cancel from the popup.
+1. Click the extension icon to open the popup
+2. Select output format (PNG, JPEG, or SVG)
+3. Click "Select Element" to activate the picker
+4. Hover over elements to highlight them
+5. Click to capture
+6. Preview and download from the popup
+
+Press <kbd>Esc</kbd> to cancel selection.
