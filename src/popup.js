@@ -2,27 +2,52 @@ const startButton = document.getElementById('start-selection');
 const cancelButton = document.getElementById('cancel-selection');
 const statusEl = document.getElementById('status');
 const resultSection = document.querySelector('.result');
-const svgOutput = document.getElementById('svg-output');
-const preview = document.getElementById('svg-preview');
-const downloadButton = document.getElementById('download-svg');
-const styleDebug = document.getElementById('style-debug');
-const styleDebugSection = document.getElementById('style-debug-section');
-const fontDebugSection = document.getElementById('font-debug-section');
-const systemFontDebugSection = document.getElementById('system-font-debug-section');
-const styleDebugList = document.getElementById('compiled-styles');
-const fontDebugList = document.getElementById('compiled-fonts');
-const systemFontDebugList = document.getElementById('compiled-system-fonts');
+const preview = document.getElementById('preview');
+const downloadButton = document.getElementById('download');
+const formatSelect = document.getElementById('format');
+const qualityControl = document.getElementById('quality-control');
+const qualitySlider = document.getElementById('quality');
+const qualityValue = document.getElementById('quality-value');
 
 const STORAGE_KEY = 'lastResult';
 
 let currentRequestId = null;
 let activeTabId = null;
+let lastCaptureData = null;
+
+function getSelectedFormat() {
+  return formatSelect.value || 'png';
+}
+
+function getSelectedQuality() {
+  return parseInt(qualitySlider.value, 10) / 100;
+}
+
+function getFileExtension(format) {
+  switch (format) {
+    case 'jpeg':
+      return 'jpg';
+    case 'svg':
+      return 'svg';
+    case 'png':
+    default:
+      return 'png';
+  }
+}
 
 async function clearStoredResult() {
   try {
     await chrome.storage.session.remove(STORAGE_KEY);
   } catch (error) {
     console.warn('Failed to clear stored result', error);
+  }
+}
+
+async function storeResult(result) {
+  try {
+    await chrome.storage.session.set({ [STORAGE_KEY]: result });
+  } catch (error) {
+    console.warn('Failed to store result', error);
   }
 }
 
@@ -33,8 +58,8 @@ async function restoreLastResult() {
     if (!result) {
       return false;
     }
-    if (result.type === 'render-complete') {
-      handleRenderComplete(result);
+    if (result.type === 'capture-complete') {
+      handleCaptureComplete(result);
       return true;
     }
     if (result.type === 'selection-cancelled') {
@@ -64,76 +89,8 @@ function setStatus(message) {
 function setLoading(isLoading) {
   startButton.disabled = isLoading;
   cancelButton.disabled = !isLoading;
-}
-
-function renderDebugData({ styles = [], fonts = [], systemFonts = [] } = {}) {
-  if (!styleDebug || !styleDebugList || !fontDebugList || !systemFontDebugList) {
-    return;
-  }
-
-  styleDebugList.innerHTML = '';
-  fontDebugList.innerHTML = '';
-  systemFontDebugList.innerHTML = '';
-
-  const styleEntries = Array.isArray(styles)
-    ? styles.filter((entry) => entry && typeof entry === 'object' && (entry.selector || entry.cssText))
-    : [];
-  const fontEntries = Array.isArray(fonts)
-    ? fonts.filter((font) => font && typeof font === 'object' && (font.name || font.style))
-    : [];
-  const systemFontEntries = Array.isArray(systemFonts)
-    ? systemFonts.filter((font) => font && typeof font === 'object' && (font.name || font.style))
-    : [];
-
-  if (styleDebugSection) {
-    styleDebugSection.hidden = styleEntries.length === 0;
-  }
-  if (fontDebugSection) {
-    fontDebugSection.hidden = fontEntries.length === 0;
-  }
-  if (systemFontDebugSection) {
-    systemFontDebugSection.hidden = systemFontEntries.length === 0;
-  }
-
-  styleEntries.forEach((entry) => {
-    const container = document.createElement('div');
-    container.className = 'debug-entry';
-
-    const selector = document.createElement('div');
-    selector.className = 'debug-selector';
-    selector.textContent = entry.selector || 'unknown';
-    container.appendChild(selector);
-
-    const pre = document.createElement('pre');
-    pre.className = 'debug-css';
-    pre.textContent = entry.cssText || '/* No inline styles captured */';
-    container.appendChild(pre);
-
-    styleDebugList.appendChild(container);
-  });
-
-  fontEntries.forEach((font) => {
-    const item = document.createElement('div');
-    item.className = 'debug-font';
-    const name = font.name || 'unknown';
-    const style = font.style || 'normal';
-    const weight = typeof font.weight === 'number' ? font.weight : String(font.weight || 'unknown');
-    item.textContent = `${name} - ${style}, ${weight}`;
-    fontDebugList.appendChild(item);
-  });
-
-  systemFontEntries.forEach((font) => {
-    const item = document.createElement('div');
-    item.className = 'debug-font';
-    const name = font.name || 'unknown';
-    const style = font.style || 'normal';
-    const weight = typeof font.weight === 'number' ? font.weight : String(font.weight || 'unknown');
-    item.textContent = `${name} - ${style}, ${weight}`;
-    systemFontDebugList.appendChild(item);
-  });
-
-  styleDebug.hidden =
-    styleEntries.length === 0 && fontEntries.length === 0 && systemFontEntries.length === 0;
+  formatSelect.disabled = isLoading;
+  qualitySlider.disabled = isLoading;
 }
 
 async function withActiveTab(callback) {
@@ -148,18 +105,23 @@ async function withActiveTab(callback) {
 async function startSelection() {
   await clearStoredResult();
   currentRequestId = crypto.randomUUID();
+  lastCaptureData = null;
+
   setLoading(true);
   setStatus('Hover and click the element to capture. Press Esc to cancel.');
   resultSection.hidden = true;
-  svgOutput.value = '';
   preview.innerHTML = '';
-  renderDebugData();
+
+  const format = getSelectedFormat();
+  const quality = getSelectedQuality();
 
   try {
     await withActiveTab((tabId) =>
       chrome.tabs.sendMessage(tabId, {
         type: 'start-selection',
-        requestId: currentRequestId
+        requestId: currentRequestId,
+        format,
+        quality
       })
     );
   } catch (error) {
@@ -180,35 +142,58 @@ async function cancelSelection() {
   setLoading(false);
   setStatus('Selection cancelled.');
   currentRequestId = null;
-  renderDebugData();
 }
 
-function handleRenderComplete(message) {
+function handleCaptureComplete(message) {
   if (!shouldHandleMessage(message)) {
     return;
   }
   setLoading(false);
   currentRequestId = null;
 
-  if (message.error) {
-    setStatus(`Rendering failed: ${message.error}`);
+  if (!message.dataUrl) {
+    setStatus('No image data was returned.');
     resultSection.hidden = true;
-    renderDebugData();
     return;
   }
 
-  if (!message.svg) {
-    setStatus('No SVG content was returned.');
-    resultSection.hidden = true;
-    renderDebugData();
-    return;
-  }
+  lastCaptureData = {
+    dataUrl: message.dataUrl,
+    format: message.format || 'png'
+  };
 
-  setStatus('SVG generated successfully.');
-  svgOutput.value = message.svg;
+  storeResult(message);
+
+  setStatus('Image captured successfully.');
   resultSection.hidden = false;
-  preview.innerHTML = message.svg;
-  renderDebugData({ styles: message.styles, fonts: message.fonts, systemFonts: message.systemFonts });
+
+  preview.innerHTML = '';
+
+  if (message.format === 'svg') {
+    // For SVG, we can embed it directly or show as image
+    const img = document.createElement('img');
+    img.src = message.dataUrl;
+    img.style.maxWidth = '100%';
+    img.style.maxHeight = '300px';
+    preview.appendChild(img);
+  } else {
+    // For PNG/JPEG, show as image
+    const img = document.createElement('img');
+    img.src = message.dataUrl;
+    img.style.maxWidth = '100%';
+    img.style.maxHeight = '300px';
+    preview.appendChild(img);
+  }
+}
+
+function handleCaptureError(message) {
+  if (!shouldHandleMessage(message)) {
+    return;
+  }
+  setLoading(false);
+  currentRequestId = null;
+  setStatus(`Capture failed: ${message.error || 'Unknown error'}`);
+  resultSection.hidden = true;
 }
 
 function handleSelectionCancelled(message) {
@@ -219,22 +204,30 @@ function handleSelectionCancelled(message) {
   currentRequestId = null;
   setStatus('Selection cancelled.');
   resultSection.hidden = true;
-  renderDebugData();
 }
 
-function downloadSvg() {
-  const svg = svgOutput.value;
-  if (!svg) {
+function downloadImage() {
+  if (!lastCaptureData?.dataUrl) {
     return;
   }
-  const blob = new Blob([svg], { type: 'image/svg+xml' });
-  const url = URL.createObjectURL(blob);
-  chrome.downloads.download({
-    url,
-    filename: 'element.svg',
-    saveAs: true
+
+  const ext = getFileExtension(lastCaptureData.format);
+  const filename = `element-${Date.now()}.${ext}`;
+
+  chrome.runtime.sendMessage({
+    type: 'download',
+    dataUrl: lastCaptureData.dataUrl,
+    filename
   });
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+}
+
+function updateQualityVisibility() {
+  const format = getSelectedFormat();
+  qualityControl.hidden = format !== 'jpeg';
+}
+
+function updateQualityDisplay() {
+  qualityValue.textContent = `${qualitySlider.value}%`;
 }
 
 chrome.runtime.onMessage.addListener((message) => {
@@ -242,23 +235,31 @@ chrome.runtime.onMessage.addListener((message) => {
     return;
   }
 
-  if (message.type === 'selection-cancelled') {
-    handleSelectionCancelled(message);
-    return;
-  }
-
-  if (message.type === 'render-complete') {
-    handleRenderComplete(message);
+  switch (message.type) {
+    case 'capture-complete':
+      handleCaptureComplete(message);
+      break;
+    case 'capture-error':
+      handleCaptureError(message);
+      break;
+    case 'selection-cancelled':
+      handleSelectionCancelled(message);
+      break;
   }
 });
 
 startButton.addEventListener('click', startSelection);
 cancelButton.addEventListener('click', cancelSelection);
-downloadButton.addEventListener('click', downloadSvg);
+downloadButton.addEventListener('click', downloadImage);
+formatSelect.addEventListener('change', updateQualityVisibility);
+qualitySlider.addEventListener('input', updateQualityDisplay);
 
+// Initialize
 setLoading(false);
 resultSection.hidden = true;
-renderDebugData();
+updateQualityVisibility();
+updateQualityDisplay();
+
 restoreLastResult().then((restored) => {
   if (!restored) {
     setStatus('Ready to capture an element.');
